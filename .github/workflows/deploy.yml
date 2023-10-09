@@ -1,0 +1,41 @@
+name: deploy eks
+
+on: [push]
+
+env:
+  AWS_ADMIN_PROFILE: cicd
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::182174426630:role/k8s-platform-eks-administrator-cicd-role
+          role-session-name: cicd-session
+          aws-region: us-east-2
+      - name: Move AWS credentials to ~/.aws/credentials
+        shell: bash
+        run: |
+          aws configure set --profile "$AWS_ADMIN_PROFILE" aws_access_key_id $AWS_ACCESS_KEY_ID
+          aws configure set --profile "$AWS_ADMIN_PROFILE" aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+          aws configure set --profile "$AWS_ADMIN_PROFILE" aws_session_token $AWS_SESSION_TOKEN
+          aws configure set --profile "$AWS_ADMIN_PROFILE" region us-east-2
+      - name: Log in to the Container registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PERSONAL_ACCESS_TOKEN }}
+      - name: install taskfile
+        shell: bash
+        run: |
+          sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
+      - name: build-eks
+        run: task build-eks AWS_ADMIN_PROFILE=$AWS_ADMIN_PROFILE

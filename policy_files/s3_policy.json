@@ -1,0 +1,25 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:sts::182174426630:assumed-role/k8s-platform-eks-administrator-cicd-role/cicd-session"
+            },
+            "Action": "s3:ListBucket",
+            "Resource": "arn:aws:s3:::datamesh-accelerator-terraform-state-182174426630"
+        },
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:sts::182174426630:assumed-role/k8s-platform-eks-administrator-cicd-role/cicd-session"
+            },
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject"
+            ],
+            "Resource": "arn:aws:s3:::datamesh-accelerator-terraform-state-182174426630/datamesh_eks_environment.tfstate"
+        }
+    ]
+}

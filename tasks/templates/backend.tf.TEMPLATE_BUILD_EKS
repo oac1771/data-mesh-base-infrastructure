@@ -1,0 +1,10 @@
+terraform {
+
+  backend "$BACKEND_TYPE_S3" {
+    bucket         = "$BUCKET"
+    key            = "$BUILD_EKS_KEY"
+    region         = "$REGION"
+    dynamodb_table = "$DYNAMO_TABLE"
+  }
+
+}

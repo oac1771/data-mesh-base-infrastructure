@@ -1,0 +1,140 @@
+version: '3'
+
+env:
+  DOCKER_DEPLOYMENT_IMAGE: ghcr.io/twlabs/deployment_environment:0
+  BOOTSTRAP_DIR: 'bootstrap-eks/'
+  BUILD_EKS_DIR: 'build-eks/'
+  BACKEND_TYPE_S3: s3
+  BUCKET: 'datamesh-accelerator-terraform-state-182174426630'
+  BOOTSTRAP_KEY: 'datamesh_eks_bootstrap_environment.tfstate'
+  BUILD_EKS_KEY: 'datamesh_eks_environment.tfstate'
+  REGION: 'us-east-2'
+  DYNAMO_TABLE: 'datamesh-accelerator-terraform-lock'
+
+tasks:
+
+  bootstrap-eks:
+    cmds:
+      - task: pull-docker-deployment-image
+      - |
+        task run-docker-container \
+          COMMAND="export AWS_DEFAULT_PROFILE={{.AWS_ADMIN_PROFILE}} && task bootstrap"
+
+  build-eks:
+    cmds:
+      - task: pull-docker-deployment-image
+      - |
+        task run-docker-container \
+          COMMAND="export AWS_DEFAULT_PROFILE={{.AWS_ADMIN_PROFILE}} && task build"
+
+  bootstrap:
+    dir: 'tasks/bootstrap-eks/'
+    cmds:
+      - terraform init
+      - |
+        TF_VAR_bucket_name=$BUCKET TF_VAR_dynamo_table_name=$DYNAMO_TABLE TF_VAR_aws_region=$REGION \
+        terraform plan
+      - |
+        TF_VAR_bucket_name=$BUCKET TF_VAR_dynamo_table_name=$DYNAMO_TABLE TF_VAR_aws_region=$REGION \
+        terraform apply -auto-approve
+      - task: migrate-to-s3-state
+
+  build:
+    dir: 'tasks/build-eks'
+    cmds:
+      - task: render-backend-template
+        vars:
+          TEMPLATE_VARS: '${BUCKET},${BUILD_EKS_KEY},${REGION},${BACKEND_TYPE_S3},${DYNAMO_TABLE}'
+          BACKEND_TEMPLATE_FILE: templates/backend.tf.TEMPLATE_BUILD_EKS
+          OUTPUT_DIR: $BUILD_EKS_DIR
+      - terraform init
+      - terraform plan
+      - terraform apply -auto-approve
+      - aws eks --region $(terraform output -raw region) update-kubeconfig --name $(terraform output -raw cluster_name)
+      - kubectl apply -f ../../k8s_manifests/aws-auth
+      - which eksctl
+      - |
+        eksctl create iamidentitymapping --cluster datamesh-accelerator-cluster --region us-east-2 \
+          --arn arn:aws:iam::182174426630:role/k8s-platform-admin-role --username admin --group datamesh-admin --no-duplicate-arns
+      - |
+        eksctl create iamidentitymapping --cluster datamesh-accelerator-cluster --region us-east-2 \
+          --arn arn:aws:iam::182174426630:role/k8s-platform-admin-cicd-role --username admin-cicd-service-user --group admin-service-user --no-duplicate-arns
+      - task: deploy-efs
+
+  build-eks-destroy:
+    dir: 'tasks/build-eks/'
+    cmds:
+      - terraform destroy -auto-approve
+
+  bootstrap-eks-destroy:
+    dir: 'tasks/bootstrap-eks/'
+    cmds:
+      - defer: { task: cleanup-s3-tfstate }
+      - TF_VAR_bucket_name=$BUCKET TF_VAR_dynamo_table_name=$DYNAMO_TABLE TF_VAR_aws_region=$REGION terraform destroy -auto-approve
+
+  deploy-efs:
+    internal: true
+    dir: 'tasks/build-eks/'
+    cmds:
+      - |
+        helm repo add aws-efs-csi-driver https://kubernetes-sigs.github.io/aws-efs-csi-driver/
+      - helm repo update
+      - |
+        helm upgrade -i aws-efs-csi-driver aws-efs-csi-driver/aws-efs-csi-driver \
+          --namespace kube-system \
+          --set image.repository=602401143452.dkr.ecr.us-east-2.amazonaws.com/eks/aws-efs-csi-driver \
+          --set controller.serviceAccount.create=false \
+          --set controller.serviceAccount.name=efs-csi-controller-sa
+      - |
+        export EFS_ID=$(terraform output -raw efs_id) && envsubst \
+          < ../../k8s_manifests/efs/efs_storageclass.yaml.TEMPLATE > ../../k8s_manifests/efs/efs_storageclass.yaml
+      - kubectl delete storageclass gp2 efs-sc --ignore-not-found=true
+      - kubectl apply -f ../../k8s_manifests/efs
+
+  render-backend-template:
+    internal: true
+    dir: 'tasks/'
+    cmds:
+      - envsubst '{{.TEMPLATE_VARS}}' <  {{.BACKEND_TEMPLATE_FILE}} > {{.OUTPUT_DIR}}/backend.tf
+  
+  migrate-to-s3-state:
+    internal: true
+    dir: 'tasks/bootstrap-eks/'
+    cmds:
+      - echo Migrating local state to s3 backend...
+      - task: render-backend-template
+        vars:
+          TEMPLATE_VARS: '${BUCKET},${BOOTSTRAP_KEY},${REGION},${BACKEND_TYPE_S3},${DYNAMO_TABLE}'
+          BACKEND_TEMPLATE_FILE: templates/backend.tf.TEMPLATE_BOOTSTRAP_EKS
+          OUTPUT_DIR: $BOOTSTRAP_DIR
+      - terraform init -force-copy
+      - task: cleanup-local-tfstate
+    status:
+      - aws s3 ls $BUCKET/$BOOTSTRAP_KEY
+
+  cleanup-local-tfstate:
+    internal: true
+    dir: 'tasks/bootstrap-eks/'
+    cmds:
+      - rm *.tfstate* || true
+
+  cleanup-s3-tfstate:
+    internal: true
+    dir: 'tasks/bootstrap-eks/'
+    cmds:
+      - rm *.tfstate
+      - rm -rf .terraform
+      - rm backend.tf
+
+  pull-docker-deployment-image:
+    cmds:
+      - docker pull $DOCKER_DEPLOYMENT_IMAGE
+
+  run-docker-container:
+    cmds:
+      - |
+        docker run --rm \
+          -v "$(pwd):/project" \
+          -v "$HOME/.aws/:/root/.aws/" \
+          --workdir /project \
+          $DOCKER_DEPLOYMENT_IMAGE sh -c "{{ .COMMAND }}"
